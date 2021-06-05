@@ -1,8 +1,5 @@
 <?php
 
-use availability_date\condition;
-use core_availability\info_module;
-
 defined('MOODLE_INTERNAL') || die();
 
 require_once($CFG->dirroot . '/filter/multilang/filter.php');
@@ -21,7 +18,7 @@ class ejsappbooking_model
     private $remlabs;
     
     public function __construct($id, $n) {
-        global $DB, $CFG, $PAGE, $OUTPUT;
+        global $DB, $USER, $CFG, $PAGE, $OUTPUT;
 
         if ($id) {
             $this->cm = get_coursemodule_from_id('ejsappbooking', $id, 0, false, MUST_EXIST);
@@ -105,7 +102,7 @@ class ejsappbooking_model
             if ($ejsappcm->uservisible) {
                 $item = new stdClass();
                 $item->lid = $remlab->id;
-                $item->name = $this->translate($remlab->name);
+                $item->name = $remlab->name;
                 array_push($this->remlabs, $item);
             }
         }
@@ -122,7 +119,7 @@ class ejsappbooking_model
              FROM {block_remlab_manager_exp2prc} 
              WHERE ejsappid = ? ", array($labid));
 
-        return $practices;
+        return  $practices;
     }
     
     public function get_user_timezone_str() {
@@ -176,10 +173,10 @@ class ejsappbooking_model
 
         return $labconf;
     }
-        
+
     public function save_booking($labid, $practid, $starttime, $endtime) {
         global $USER,$DB;
-        
+
         $bk = new stdClass();
             $bk->username = $USER->username;
             $bk->ejsappid = $labid;
@@ -193,6 +190,26 @@ class ejsappbooking_model
         
         return $bookid;
     }
+
+    //DMF-I
+    public function save_booking_external($labid, $practid, $starttime, $endtime, $user_bk) {
+        global $DB;
+
+        $bk = new stdClass();
+        $bk->username = $user_bk->username;
+        $bk->ejsappid = $labid;
+        $bk->practiceid = $practid;
+        $bk->starttime = $starttime;
+        $bk->endtime = $endtime;
+        $bk->valid = 1;
+
+        // Save in database.
+        $bookid = $DB->insert_record('ejsappbooking_remlab_access', $bk, true);
+
+        return $bookid;
+    }
+    //DMF-F
+
     
     public function create_event($labid, $practid, $starttime, $endtime, $slot_size) {
         global $DB, $USER;
@@ -271,6 +288,25 @@ class ejsappbooking_model
         
         return ($query != null );
     }
+
+    //DMF-I
+    public function booking_exists_external($labid, $practid, $date, $user_bk) {
+        global $DB;
+
+        $server_tz = $this->get_default_timezone();
+
+        $sdate = clone $date;
+        $sdate->setTimeZone($server_tz);
+
+        $query = $DB->record_exists('ejsappbooking_remlab_access', array(
+                'starttime' => $sdate->format("Y-m-d H:i:s"),
+                'ejsappid' => $labid, 'practiceid' => $practid, 'username' => $user_bk->username
+            )
+        );
+
+        return ($query != null );
+    }
+    //DMF-F
     
     public function delete_booking($bookid) { // Check and delete booking
         global $DB, $USER;
@@ -317,18 +353,18 @@ class ejsappbooking_model
         return null;
     }
     
-    public function get_day_bookings($labid, $date, $checkavailability = false) {
+    public function get_day_bookings($labid, $date) {
         global $DB;
         
         $user_tz = $this->get_user_timezone();
         $server_tz = $this->get_default_timezone();
         
         $sdate = clone $date;
-        $sdate->setTime(0,0,0);
-        $sdate->setTimeZone($server_tz);
+            $sdate->setTime(0,0,0);
+            $sdate->setTimeZone($server_tz);
         
         $edate= clone $sdate;
-        $edate->add(new DateInterval('PT24H'));
+            $edate->add(new DateInterval('PT24H'));
         
         $dayaccesses = $DB->get_records_sql("
             SELECT starttime
@@ -339,94 +375,17 @@ class ejsappbooking_model
             ORDER BY starttime ASC", 
             array($labid, $sdate->format('Y-m-d H:i:s'), $edate->format('Y-m-d H:i:s'),
                 $this->get_sql_str_to_date_query(), $this->get_sql_str_to_date_query()));
-
-        $list = [];
         
-        foreach ($dayaccesses as $slot) {
-            $date = DateTime::createFromFormat('Y-m-d H:i:s', $slot->starttime, $server_tz);
-            $date->setTimeZone($user_tz);
+         $list = [];
+        
+         foreach ($dayaccesses as $slot) {
+             
+            $date=DateTime::createFromFormat('Y-m-d H:i:s', $slot->starttime, $server_tz);
+                $date->setTimeZone($user_tz);
+             
             array_push($list, $date->format("H:i"));
         }
-
-        if ($checkavailability) {
-            $moduleid = $DB->get_field('modules', 'id', array('name' => 'ejsapp'));
-            $courseid = $DB->get_field('ejsapp', 'course', array('id' => 1));
-            $cmid = $DB->get_field('course_modules', 'id', array('instance' => $labid, 'module' => $moduleid,
-                'course' => $courseid));
-            $modinfo = get_fast_modinfo($courseid);
-            $cm = $modinfo->get_cm($cmid);
-
-            if ($cm->availability) {
-                $info = new info_module($cm);
-                $json = json_decode($cm->availability);
-                $conditions = $json->c;
-                if (strlen($json->op) > 1) {
-                    $not = true;
-                    $op = substr($json->op, 1, 1);
-                } else {
-                    $not = false;
-                    $op = $json->op;
-                }
-
-                $inittime = $sdate->getTimeStamp();
-                $endtime = $inittime + 24 * 60 * 60;
-                $practiceintro = $DB->get_field('block_remlab_manager_exp2prc', 'practiceintro',
-                    array('practiceid' => 1, 'ejsappid' => $labid));
-                $slotduration = $DB->get_field('block_remlab_manager_conf', 'slotsduration',
-                    array('practiceintro' => $practiceintro));
-                $slotduration = $this->get_slot_size($slotduration) * 60;
-                for ($slottime = $inittime; $slottime < $endtime; $slottime += $slotduration) {
-                    $available = $this->check_nested_conditions($conditions, $slottime, $not, $info, $op);
-                    if (!$available) $list = $this->append_hours($slottime, $server_tz, $user_tz, $list);
-                }
-            }
-        }
         
-        return $list;
-    }
-
-    private function check_nested_conditions($conditions, $slottime, $not, $info, $op) {
-        ($op == '|') ? $available = false : $available = true;
-        for ($i = 0; $i < count($conditions); $i++) {
-            if (isset($conditions[$i]->c)) {
-                $deeperconditions = $conditions[$i]->c;
-                if (strlen($conditions[$i]->op) > 1) {
-                    $deepernot = true;
-                    $deeperop = substr($conditions[$i]->op, 1, 1);
-                } else {
-                    $deepernot = false;
-                    $deeperop = $conditions[$i]->op;
-                }
-                $available = $this->check_nested_conditions($deeperconditions, $slottime, $deepernot, $info, $deeperop);
-                if ($not && !$deepernot) $available = !$available;
-            } else {
-                $available = $this->check_single_condition($conditions[$i], $slottime, $not, $info, $op, $available);
-            }
-            if ($op == '|') {
-                if ($available) break;
-            } else {
-                if (!$available) break;
-            }
-        }
-        return $available;
-    }
-
-    private function check_single_condition($condition, $slottime, $not, $info, $op, $available) {
-        global $USER;
-        if ($condition->type == "date") {
-            $date = new condition((object)array('d' => $condition->d, 't' => $condition->t));
-            $date->set_current_time_for_test($slottime);
-            $newavailable = $date->is_available($not, $info, true, $USER->id);
-            ($op == '|') ? $available |= $newavailable : $available &= $newavailable;
-        }
-        return $available;
-    }
-
-    private function append_hours($slottime, $server_tz, $user_tz, $list) {
-        $slot = date('Y-m-d H:i:s', $slottime);
-        $date = DateTime::createFromFormat('Y-m-d H:i:s', $slot, $server_tz);
-        $date->setTimeZone($user_tz);
-        array_push($list, $date->format("H:i"));
         return $list;
     }
     
@@ -502,9 +461,9 @@ class ejsappbooking_model
             FROM {ejsappbooking_remlab_access} a INNER JOIN {ejsapp} b ON a.ejsappid = b.id 
             INNER JOIN {block_remlab_manager_exp2prc} c ON a.practiceid = c.practiceid  
             WHERE a.ejsappid = c.ejsappid AND a.username = ? 
-            AND a.endtime > ?
+            AND a.starttime >= ?
             ORDER BY a.starttime",
-            array($USER->username, $sdate->format('Y-m-d H:i:s'), $this->get_sql_str_to_date_query()));
+            array( $USER->username, $sdate->format('Y-m-d H:i:s'), $this->get_sql_str_to_date_query()));
         
         return $bookings;
     }
